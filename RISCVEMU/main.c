@@ -4,8 +4,8 @@
 uint32_t RAM_SIZE=1024*1024;
 uint32_t START_ADDRES= 0X0000;
 #define debug  1   // if you wanted to print state of cpu regs set 1 else 0
-uint32_t instruct[]={},number_of_instructions=1;  //INPUT INSTRUCTIONS
-//0b1000100000000110011
+uint32_t instruct[]={0b1000100000000110011},number_of_instructions=1;  //INPUT INSTRUCTIONS
+//0b1000100000000110011  add
 /*void load_instruction(FILE *fajl)
 {
     size_t i=0;
