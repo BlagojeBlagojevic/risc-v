@@ -1,4 +1,4 @@
-//RISCV emu 
+
 
 #include <stdio.h>
 #include <stdint.h>
@@ -18,18 +18,22 @@
 
 #include <assert.h>
 
+
+
 #define WARNING(...)        fprintf(stdout, __VA_ARGS__)
 #define ERROR_BREAK(...)    fprintf(stderr, __VA_ARGS__); exit(-1)
-#define LOG(...)     			  fprintf(stdout, __VA_ARGS__)
+//#define LOG(...)     			  fprintf(stdout, __VA_ARGS__)
+#define LOG(...)
+#define PRINT(...)     			  fprintf(stdout, __VA_ARGS__)
 #define PAUSE()           {char a; fputs(a, stdin);}
 #define CLAMP(X, LOW, HIGH) {if((X) < (LOW)) (X) = (LOW); if((X) > (HIGH)) (X) = (HIGH);}
-#define ASSERT(msg) {fprintf(stderr, "aseert in:\n\tFILE %s\n\tLINE %d\n\tmsg: %s" , __FILE__, __LINE__, msg); exit(-1);}
+#define ASSERT(msg, ...) {fprintf(stdout, "aseert in:\n\tFILE %s\n\tLINE %d\n\tmsg: %s" , __FILE__, __LINE__, msg); exit(-1);}
 #define DROP(var) {(void)var;}
 
 
 
 
-#define DRAM_SIZE 1024*1024*1
+#define DRAM_SIZE 1024*1024*8*4  //4 MB
 #define DRAM_BASE 0x80000000
 
 #ifndef RISCV_DECORATOR 
@@ -39,16 +43,38 @@
 typedef struct DRAM {
 	U8 mem[DRAM_SIZE];     // Dram memory of DRAM_SIZE
 } DRAM;
+ 
+
+//Maybe some status REGS we see
+
+
+//IF UART_STORE is != (U64)0 UART_DATA_STORE
+#define  UART_STORE    0x10000000 
+//IF UART_READ is != (U64)0 UART_READ_STORE
+#define  UART_READ    0x10000001 
+
+//Uart driver
+enum{
+	RECV,
+	SEND,
+};
+typedef struct UART{
+	U16 pc[2];
+	U8  is[2];
+	U64 recv[0xFA00];
+	U64 send[0xFA00];
+}UART;
 
 typedef struct BUS {
-    struct DRAM dram;
+   	 DRAM dram;
+   	 UART uart;
 } BUS;
 
 
-typedef struct{
+typedef struct CPU{
 	U64 regs[32]; //Regs 32 64 bit regs
 	U64 pc;
-	U64 csr[4096]; //https://docs.riscv.org/reference/isa/priv/priv-csrs.html
+	U64 csr[128]; //https://docs.riscv.org/reference/isa/priv/priv-csrs.html
 	BUS bus;
 }CPU;
 
@@ -226,13 +252,61 @@ RISCV_DECORATOR void dram_store(DRAM* dram, U64 addr, U64 size, U64 value) {
     }
 }
 
-//Bus stuff just a wraper around dram 
 
+enum{
+	FALSE,
+	TRUE
+};
+
+
+//Uart stuff
+RISCV_DECORATOR void uart_init(BUS* bus){
+	
+	bus->uart.pc[SEND]  = 0x00;
+	bus->uart.is[SEND]  = 0x0;
+	bus->uart.pc[RECV]  = 0x00;
+	bus->uart.is[RECV]  = 0X0;
+	for(U16 i = 0; i < 0XFA00; i++){
+		bus->uart.send[i] = (U64)0x00;
+		bus->uart.recv[i] = (U64)0x00;	
+	}
+	LOG("\n\n\t\tUART INIT\n\n");
+	//PAUSE();
+}
+
+
+
+RISCV_DECORATOR U8 uart_read(BUS* bus){
+	//PRINT("UART %c\n", bus->uart.send[0]);
+        //fflush(stdout);
+	return bus->uart.send[0]; //Tbd
+}
+
+RISCV_DECORATOR void uart_write(BUS* bus, U8 value){
+ 	PRINT("%c", value);
+	fflush(stdout);
+	bus->uart.recv[0] = value;	
+}
+
+
+//Bus stuff just a wraper around dram 
+//Size 1 is uart 
 RISCV_DECORATOR U64 bus_load(BUS* bus, U64 addr, U64 size) {
-    return dram_load(&(bus->dram), addr, size);
+   	if(addr == UART_READ){
+		return uart_read(bus);
+	}
+	else if(addr >= DRAM_BASE - 100 && addr < DRAM_BASE + DRAM_SIZE)	
+		return dram_load(&(bus->dram), addr, size);
+	//else ASSERT("Segfault mem load\n", addr);
 }
 RISCV_DECORATOR void bus_store(BUS* bus, U64 addr, U64 size, U64 value) {
-    dram_store(&(bus->dram), addr, size, value);
+    	if(addr == UART_STORE){
+		uart_write(bus, (U8)value);	
+	}
+	else if(addr >= DRAM_BASE && addr < DRAM_BASE + DRAM_SIZE){
+		dram_store(&(bus->dram), addr, size, value);
+	}
+	//else ASSERT("Segfault mem store\n", addr);
 }
 
 
@@ -255,13 +329,14 @@ RISCV_DECORATOR void csr_write(CPU* cpu, U64 csr, U64 value) {
 
 // print operation for DEBUG
 RISCV_DECORATOR void print_op(char* s) {
-    printf("%s%s%s", ANSI_BLUE, s, ANSI_RESET);
+   LOG("%s%s%s", ANSI_BLUE, s, ANSI_RESET);
 }
 
 RISCV_DECORATOR void cpu_init(CPU *cpu) {
     cpu->regs[0] = 0x00;                    // register x0 hardwired to 0
     cpu->regs[2] = DRAM_BASE + DRAM_SIZE;   // Set stack pointer
     cpu->pc      = DRAM_BASE;               // Set program counter to the base address
+    uart_init(&cpu->bus);
 }
 
 RISCV_DECORATOR U32 cpu_fetch(CPU *cpu) {
@@ -288,7 +363,7 @@ RISCV_DECORATOR U64 rd(U32 inst ) {
 RISCV_DECORATOR U64 rs1(U32 inst ) {
     return (inst >> 15) & 0x1f;   // rs1 in bits 19..15
 }
-U64 rs2(U32 inst ) {
+RISCV_DECORATOR U64 rs2(U32 inst ) {
     return (inst >> 20) & 0x1f;   // rs2 in bits 24..20
 }
 
@@ -359,8 +434,7 @@ RISCV_DECORATOR void exec_JAL(CPU* cpu, U32 inst) {
     cpu->pc = cpu->pc + (I64) imm - 4;
     print_op("jal\n");
     if (ADDR_MISALIGNED(cpu->pc)) {
-        fprintf(stderr, "JAL pc address misalligned");
-        exit(0);
+      ERROR_BREAK("JAL pc address misalligned");
     }
 }
 
@@ -373,8 +447,7 @@ RISCV_DECORATOR void exec_JALR(CPU* cpu, U32 inst) {
     /*print_op("NEXT -> %#lx, imm:%#lx\n", cpu->pc, imm);*/
     print_op("jalr\n");
     if (ADDR_MISALIGNED(cpu->pc)) {
-        fprintf(stderr, "JAL pc address misalligned");
-        exit(0);
+        ERROR_BREAK( "JAL pc address misalligned");
     }
 }
 
@@ -636,7 +709,6 @@ RISCV_DECORATOR void exec_FENCE(CPU* cpu, U32 inst) {
     print_op("fence\n");
 }
 
-
 RISCV_DECORATOR void exec_ECALL(CPU* cpu, U32 inst) {}
 
 RISCV_DECORATOR void exec_EBREAK(CPU* cpu, U32 inst) {}
@@ -792,6 +864,7 @@ RISCV_DECORATOR void exec_AMOOR_W(CPU* cpu, U32 inst) {
     cpu_store(cpu, cpu->regs[rs1(inst)], 32, res);
     print_op("amoor.w\n");
 } 
+//Todo 
 RISCV_DECORATOR void exec_AMOMIN_W(CPU* cpu, U32 inst) {} 
 RISCV_DECORATOR void exec_AMOMAX_W(CPU* cpu, U32 inst) {} 
 RISCV_DECORATOR void exec_AMOMINU_W(CPU* cpu, U32 inst) {} 
@@ -829,6 +902,7 @@ RISCV_DECORATOR void exec_AMOOR_D(CPU* cpu, U32 inst) {
     cpu_store(cpu, cpu->regs[rs1(inst)], 32, res);
     print_op("amoor.w\n");
 } 
+//Todo Implement or not
 RISCV_DECORATOR void exec_AMOMIN_D(CPU* cpu, U32 inst) {} 
 RISCV_DECORATOR void exec_AMOMAX_D(CPU* cpu, U32 inst) {} 
 RISCV_DECORATOR void exec_AMOMINU_D(CPU* cpu, U32 inst) {} 
@@ -843,177 +917,177 @@ int cpu_execute(CPU *cpu, U32 inst) {
 
     /*printf("%s\n%#.8lx -> Inst: %#.8x <OpCode: %#.2x, funct3:%#x, funct7:%#x> %s",*/
             /*ANSI_YELLOW, cpu->pc-4, inst, opcode, funct3, funct7, ANSI_RESET); // DEBUG*/
-    printf("%s\n%#.8lx -> %s", ANSI_YELLOW, cpu->pc-4, ANSI_RESET); // DEBUG
+    LOG("%s\n%#.8lx -> %s", ANSI_YELLOW, cpu->pc-4, ANSI_RESET); // DEBUG
+    	switch (opcode) {
+        	case LUI:   exec_LUI(cpu, inst); break;
+        	case AUIPC: exec_AUIPC(cpu, inst); break;
+	
+	        case JAL:   exec_JAL(cpu, inst); break;
+	        case JALR:  exec_JALR(cpu, inst); break;
 
-    switch (opcode) {
-        case LUI:   exec_LUI(cpu, inst); break;
-        case AUIPC: exec_AUIPC(cpu, inst); break;
+	        case B_TYPE:
+        	    switch (funct3) {
+                	case BEQ:   exec_BEQ(cpu, inst); break;
+                	case BNE:   exec_BNE(cpu, inst); break;
+                	case BLT:   exec_BLT(cpu, inst); break;
+                	case BGE:   exec_BGE(cpu, inst); break;
+                	case BLTU:  exec_BLTU(cpu, inst); break;
+	                case BGEU:  exec_BGEU(cpu, inst); break;
+	                default: ;
+	            } break;
 
-        case JAL:   exec_JAL(cpu, inst); break;
-        case JALR:  exec_JALR(cpu, inst); break;
+	        case LOAD:
+	            switch (funct3) {
+	                case LB  :  exec_LB(cpu, inst); break;  
+	                case LH  :  exec_LH(cpu, inst); break;  
+	                case LW  :  exec_LW(cpu, inst); break;  
+	                case LD  :  exec_LD(cpu, inst); break;  
+	                case LBU :  exec_LBU(cpu, inst); break; 
+	                case LHU :  exec_LHU(cpu, inst); break; 
+	                case LWU :  exec_LWU(cpu, inst); break; 
+	                default: ;
+	            } break;
 
-        case B_TYPE:
-            switch (funct3) {
-                case BEQ:   exec_BEQ(cpu, inst); break;
-                case BNE:   exec_BNE(cpu, inst); break;
-                case BLT:   exec_BLT(cpu, inst); break;
-                case BGE:   exec_BGE(cpu, inst); break;
-                case BLTU:  exec_BLTU(cpu, inst); break;
-                case BGEU:  exec_BGEU(cpu, inst); break;
-                default: ;
-            } break;
+	        case S_TYPE:
+	            switch (funct3) {
+	                case SB  :  exec_SB(cpu, inst); break;  
+	                case SH  :  exec_SH(cpu, inst); break;  
+	                case SW  :  exec_SW(cpu, inst); break;  
+	                case SD  :  exec_SD(cpu, inst); break;  
+	                default: ;
+	            } break;
 
-        case LOAD:
-            switch (funct3) {
-                case LB  :  exec_LB(cpu, inst); break;  
-                case LH  :  exec_LH(cpu, inst); break;  
-                case LW  :  exec_LW(cpu, inst); break;  
-                case LD  :  exec_LD(cpu, inst); break;  
-                case LBU :  exec_LBU(cpu, inst); break; 
-                case LHU :  exec_LHU(cpu, inst); break; 
-                case LWU :  exec_LWU(cpu, inst); break; 
-                default: ;
-            } break;
+	        case I_TYPE:  
+	            switch (funct3) {
+	                case ADDI:  exec_ADDI(cpu, inst); break;
+	                case SLLI:  exec_SLLI(cpu, inst); break;
+	                case SLTI:  exec_SLTI(cpu, inst); break;
+	                case SLTIU: exec_SLTIU(cpu, inst); break;
+	                case XORI:  exec_XORI(cpu, inst); break;
+	                case SRI:   
+	                    switch (funct7) {
+	                        case SRLI:  exec_SRLI(cpu, inst); break;
+	                        case SRAI:  exec_SRAI(cpu, inst); break;
+	                        default: ;
+	                    } break;
+	                case ORI:   exec_ORI(cpu, inst); break;
+	                case ANDI:  exec_ANDI(cpu, inst); break;
+	                default:
+	                    ERROR_BREAK( 
+	                            "[-] ERROR-> opcode:0x%x, funct3:0x%x, funct7:0x%x\n"
+	                            , opcode, funct3, funct7);
+	                    return 0;
+	            } break;
 
-        case S_TYPE:
-            switch (funct3) {
-                case SB  :  exec_SB(cpu, inst); break;  
-                case SH  :  exec_SH(cpu, inst); break;  
-                case SW  :  exec_SW(cpu, inst); break;  
-                case SD  :  exec_SD(cpu, inst); break;  
-                default: ;
-            } break;
+	        case R_TYPE:  
+	            switch (funct3) {
+	                case ADDSUB:
+	                    switch (funct7) {
+	                        case ADD: exec_ADD(cpu, inst);
+	                        case SUB: exec_ADD(cpu, inst);
+	                        default: ;
+	                    } break;
+	                case SLL:  exec_SLL(cpu, inst); break;
+	                case SLT:  exec_SLT(cpu, inst); break;
+	                case SLTU: exec_SLTU(cpu, inst); break;
+	                case XOR:  exec_XOR(cpu, inst); break;
+	                case SR:   
+	                    switch (funct7) {
+	                        case SRL:  exec_SRL(cpu, inst); break;
+	                        case SRA:  exec_SRA(cpu, inst); break;
+	                        default: break;
+	                    }
+	                case OR:   exec_OR(cpu, inst); break;
+	                case AND:  exec_AND(cpu, inst); break;
+	                default:
+	                    ERROR_BREAK( 
+	                            "[-] ERROR-> opcode:0x%x, funct3:0x%x, funct7:0x%x\n"
+	                            , opcode, funct3, funct7);
+	                    return 0;
+	            } break;
 
-        case I_TYPE:  
-            switch (funct3) {
-                case ADDI:  exec_ADDI(cpu, inst); break;
-                case SLLI:  exec_SLLI(cpu, inst); break;
-                case SLTI:  exec_SLTI(cpu, inst); break;
-                case SLTIU: exec_SLTIU(cpu, inst); break;
-                case XORI:  exec_XORI(cpu, inst); break;
-                case SRI:   
-                    switch (funct7) {
-                        case SRLI:  exec_SRLI(cpu, inst); break;
-                        case SRAI:  exec_SRAI(cpu, inst); break;
-                        default: ;
-                    } break;
-                case ORI:   exec_ORI(cpu, inst); break;
-                case ANDI:  exec_ANDI(cpu, inst); break;
-                default:
-                    fprintf(stderr, 
-                            "[-] ERROR-> opcode:0x%x, funct3:0x%x, funct7:0x%x\n"
-                            , opcode, funct3, funct7);
-                    return 0;
-            } break;
+	        case FENCE: exec_FENCE(cpu, inst); break;
 
-        case R_TYPE:  
-            switch (funct3) {
-                case ADDSUB:
-                    switch (funct7) {
-                        case ADD: exec_ADD(cpu, inst);
-                        case SUB: exec_ADD(cpu, inst);
-                        default: ;
-                    } break;
-                case SLL:  exec_SLL(cpu, inst); break;
-                case SLT:  exec_SLT(cpu, inst); break;
-                case SLTU: exec_SLTU(cpu, inst); break;
-                case XOR:  exec_XOR(cpu, inst); break;
-                case SR:   
-                    switch (funct7) {
-                        case SRL:  exec_SRL(cpu, inst); break;
-                        case SRA:  exec_SRA(cpu, inst); break;
-                        default: ;
-                    }
-                case OR:   exec_OR(cpu, inst); break;
-                case AND:  exec_AND(cpu, inst); break;
-                default:
-                    fprintf(stderr, 
-                            "[-] ERROR-> opcode:0x%x, funct3:0x%x, funct7:0x%x\n"
-                            , opcode, funct3, funct7);
-                    return 0;
-            } break;
+	        case I_TYPE_64:
+	            switch (funct3) {
+	                case ADDIW: exec_ADDIW(cpu, inst); break;
+	                case SLLIW: exec_SLLIW(cpu, inst); break;
+	                case SRIW : 
+	                    switch (funct7) {
+	                        case SRLIW: exec_SRLIW(cpu, inst); break;
+	                        case SRAIW: exec_SRLIW(cpu, inst); break;
+	                    } break;
+	            } break;
 
-        case FENCE: exec_FENCE(cpu, inst); break;
+	        case R_TYPE_64:
+	            switch (funct3) {
+	                case ADDSUB:
+	                    switch (funct7) {
+	                        case ADDW:  exec_ADDW(cpu, inst); break;
+	                        case SUBW:  exec_SUBW(cpu, inst); break;
+	                        case MULW:  exec_MULW(cpu, inst); break;
+	                    } break;
+	                case DIVW:  exec_DIVW(cpu, inst); break;
+	                case SLLW:  exec_SLLW(cpu, inst); break;
+	                case SRW:
+	                    switch (funct7) {
+	                        case SRLW:  exec_SRLW(cpu, inst); break;
+	                        case SRAW:  exec_SRAW(cpu, inst); break;
+	                        case DIVUW: exec_DIVUW(cpu, inst); break;
+	                    } break;
+	                case REMW:  exec_REMW(cpu, inst); break;
+	                case REMUW: exec_REMUW(cpu, inst); break;
+	                default: ;
+	            } break;
 
-        case I_TYPE_64:
-            switch (funct3) {
-                case ADDIW: exec_ADDIW(cpu, inst); break;
-                case SLLIW: exec_SLLIW(cpu, inst); break;
-                case SRIW : 
-                    switch (funct7) {
-                        case SRLIW: exec_SRLIW(cpu, inst); break;
-                        case SRAIW: exec_SRLIW(cpu, inst); break;
-                    } break;
-            } break;
+	        case CSR:
+			//break;
+	           switch (funct3) {
+	                case ECALLBREAK:    exec_ECALLBREAK(cpu, inst); break;
+	                case CSRRW  :  exec_CSRRW(cpu, inst); break;  
+	                case CSRRS  :  exec_CSRRS(cpu, inst); break;  
+	                case CSRRC  :  exec_CSRRC(cpu, inst); break;  
+	                case CSRRWI :  exec_CSRRWI(cpu, inst); break; 
+	                case CSRRSI :  exec_CSRRSI(cpu, inst); break; 
+	                case CSRRCI :  exec_CSRRCI(cpu, inst); break; 
+	                default:
+	                    ERROR_BREAK( 
+	                            "[-] ERROR-> opcode:0x%x, funct3:0x%x, funct7:0x%x\n"
+	                            , opcode, funct3, funct7);
+	                    return 0;
+	            } break;
 
-        case R_TYPE_64:
-            switch (funct3) {
-                case ADDSUB:
-                    switch (funct7) {
-                        case ADDW:  exec_ADDW(cpu, inst); break;
-                        case SUBW:  exec_SUBW(cpu, inst); break;
-                        case MULW:  exec_MULW(cpu, inst); break;
-                    } break;
-                case DIVW:  exec_DIVW(cpu, inst); break;
-                case SLLW:  exec_SLLW(cpu, inst); break;
-                case SRW:
-                    switch (funct7) {
-                        case SRLW:  exec_SRLW(cpu, inst); break;
-                        case SRAW:  exec_SRAW(cpu, inst); break;
-                        case DIVUW: exec_DIVUW(cpu, inst); break;
-                    } break;
-                case REMW:  exec_REMW(cpu, inst); break;
-                case REMUW: exec_REMUW(cpu, inst); break;
-                default: ;
-            } break;
+	        case AMO_W:
+	            switch (funct7 >> 2) { // since, funct[1:0] = aq, rl
+	                case LR_W      :  exec_LR_W(cpu, inst); break;  
+	                case SC_W      :  exec_SC_W(cpu, inst); break;  
+	                case AMOSWAP_W :  exec_AMOSWAP_W(cpu, inst); break;  
+	                case AMOADD_W  :  exec_AMOADD_W(cpu, inst); break; 
+	                case AMOXOR_W  :  exec_AMOXOR_W(cpu, inst); break; 
+	                case AMOAND_W  :  exec_AMOAND_W(cpu, inst); break; 
+	                case AMOOR_W   :  exec_AMOOR_W(cpu, inst); break; 
+	                case AMOMIN_W  :  exec_AMOMIN_W(cpu, inst); break; 
+	                case AMOMAX_W  :  exec_AMOMAX_W(cpu, inst); break; 
+	                case AMOMINU_W :  exec_AMOMINU_W(cpu, inst); break; 
+	                case AMOMAXU_W :  exec_AMOMAXU_W(cpu, inst); break; 
+	                default:
+	                    ERROR_BREAK( 
+	                            "[-] ERROR-> opcode:0x%x, funct3:0x%x, funct7:0x%x\n"
+	                            , opcode, funct3, funct7);
+	                    return 0;
+	            } break;
 
-        case CSR:
-            switch (funct3) {
-                case ECALLBREAK:    exec_ECALLBREAK(cpu, inst); break;
-                case CSRRW  :  exec_CSRRW(cpu, inst); break;  
-                case CSRRS  :  exec_CSRRS(cpu, inst); break;  
-                case CSRRC  :  exec_CSRRC(cpu, inst); break;  
-                case CSRRWI :  exec_CSRRWI(cpu, inst); break; 
-                case CSRRSI :  exec_CSRRSI(cpu, inst); break; 
-                case CSRRCI :  exec_CSRRCI(cpu, inst); break; 
-                default:
-                    fprintf(stderr, 
-                            "[-] ERROR-> opcode:0x%x, funct3:0x%x, funct7:0x%x\n"
-                            , opcode, funct3, funct7);
-                    return 0;
-            } break;
+	        case 0x00:
+	            return 0;
 
-        case AMO_W:
-            switch (funct7 >> 2) { // since, funct[1:0] = aq, rl
-                case LR_W      :  exec_LR_W(cpu, inst); break;  
-                case SC_W      :  exec_SC_W(cpu, inst); break;  
-                case AMOSWAP_W :  exec_AMOSWAP_W(cpu, inst); break;  
-                case AMOADD_W  :  exec_AMOADD_W(cpu, inst); break; 
-                case AMOXOR_W  :  exec_AMOXOR_W(cpu, inst); break; 
-                case AMOAND_W  :  exec_AMOAND_W(cpu, inst); break; 
-                case AMOOR_W   :  exec_AMOOR_W(cpu, inst); break; 
-                case AMOMIN_W  :  exec_AMOMIN_W(cpu, inst); break; 
-                case AMOMAX_W  :  exec_AMOMAX_W(cpu, inst); break; 
-                case AMOMINU_W :  exec_AMOMINU_W(cpu, inst); break; 
-                case AMOMAXU_W :  exec_AMOMAXU_W(cpu, inst); break; 
-                default:
-                    fprintf(stderr, 
-                            "[-] ERROR-> opcode:0x%x, funct3:0x%x, funct7:0x%x\n"
-                            , opcode, funct3, funct7);
-                    return 0;
-            } break;
-
-        case 0x00:
-            return 0;
-
-        default:
-            fprintf(stderr, 
-                    "[-] ERROR-> opcode:0x%x, funct3:0x%x, funct3:0x%x\n"
-                    , opcode, funct3, funct7);
-            return 0;
-            /*exit(1);*/
-    }
-    return 1;
+	        default:
+	            ERROR_BREAK( 
+	                    "[-] ERROR-> opcode:0x%x, funct3:0x%x, funct3:0x%x\n"
+	                    , opcode, funct3, funct7);
+	            return 0;
+	            /*exit(1);*/
+	    }
+	    return 1;
 }
 
 RISCV_DECORATOR void dump_registers(CPU *cpu) {
@@ -1036,16 +1110,15 @@ RISCV_DECORATOR void dump_registers(CPU *cpu) {
     /*}*/
 
     for (int i=0; i<8; i++) {
-        printf("   %4s: %#-13.2lx  ", abi[i],    cpu->regs[i]);
-        printf("   %2s: %#-13.2lx  ", abi[i+8],  cpu->regs[i+8]);
-        printf("   %2s: %#-13.2lx  ", abi[i+16], cpu->regs[i+16]);
-        printf("   %3s: %#-13.2lx\n", abi[i+24], cpu->regs[i+24]);
+        LOG("   %4s: %#-13.2lx  ", abi[i],    cpu->regs[i]);
+        LOG("   %2s: %#-13.2lx  ", abi[i+8],  cpu->regs[i+8]);
+        LOG("   %2s: %#-13.2lx  ", abi[i+16], cpu->regs[i+16]);
+        LOG("   %3s: %#-13.2lx\n", abi[i+24], cpu->regs[i+24]);
     }
 
 }
 
-void read_file(CPU* cpu, char *filename)
-{
+void read_file(CPU* cpu, char *filename){
 	FILE *file;
 	uint8_t *buffer;
 	unsigned long fileLen;
@@ -1054,7 +1127,7 @@ void read_file(CPU* cpu, char *filename)
 	file = fopen(filename, "rb");
 	if (!file)
 	{
-		fprintf(stderr, "Unable to open file %s", filename);
+		ERROR_BREAK( "Unable to open file %s", filename);
 	}
 
 	//Get file length
@@ -1066,7 +1139,7 @@ void read_file(CPU* cpu, char *filename)
 	buffer=(uint8_t *)malloc(fileLen+1);
 	if (!buffer)
 	{
-		fprintf(stderr, "Memory error!");
+		ERROR_BREAK( "Memory error!");
         fclose(file);
 	}
 
