@@ -1,6 +1,6 @@
 #define UART_STORE 0x10000000
 #define UART_READ  0x10000001
-
+//tHIS IS FLAT BINARY!!!
 void putchar(char c);
 void puts_simple();  
 int main() {
