@@ -30,4 +30,4 @@ clean:
 	rm -f test
 	rm -f test.bin
 	rm -f test.s
-	rm -f main kao organizovati linker za ovaj problem
+	rm -f main 
