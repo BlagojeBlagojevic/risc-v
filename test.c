@@ -6,7 +6,7 @@ void puts_simple();
 int main() {
     puts_simple();
     
-    // Write 'a' to UART as requested
+
     volatile char *ptr = (volatile char *)UART_STORE;
     volatile char *read = (volatile char *)UART_READ;
     
